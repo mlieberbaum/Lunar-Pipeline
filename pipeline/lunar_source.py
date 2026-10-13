@@ -28,6 +28,9 @@ FINE_GAIN = 2.2
 FINE_SIGMA = 2.0
 BLEND = .75
 FACTOR_MAX = 3.0
+# Smooth limit on log detail: tanh keeps it monotonic (no clipped plateaus)
+# while preventing near-black penumbra samples or deep shadows from dominating.
+LOG_LIMIT = 1.0
 # Reflectance floor for the logarithm, in code/65535 units (about DN 25).
 MEAN_FLOOR = 2 * 25 / 65535
 
@@ -139,6 +142,7 @@ def detail(v, valid, sigma, gain=1.0):
     coarse = _piecewise_mean(lv, w, sigma, pieces)
     fine = _piecewise_mean(lv, w, FINE_SIGMA, pieces)
     log_factor = gain * (MID_GAIN * (fine - coarse) + FINE_GAIN * (lv - fine))
+    log_factor = LOG_LIMIT * np.tanh(log_factor / LOG_LIMIT)
     factor = np.minimum(np.exp(log_factor), FACTOR_MAX)
     return ((factor - 1) / BLEND * (w > 0)).astype(np.float32)
 
@@ -238,6 +242,10 @@ def align_reference(orbiter, seamless_code, target, size=12288, name='Seamless')
 GAIN_REFERENCE_RATIO = 1.2
 GAIN_LIMITS = (.45, 1.2)
 GAIN_WINDOW = 40.0  # reference pixels (~3.5 km)
+# Where no Kaguya product has data and the smoothed reference is below this
+# level (0..1), the region is treated as genuine shadow and keeps the
+# reference tone instead of receiving synthetic texture.
+SHADOW_REFERENCE_LEVEL = .12
 
 
 def gain_field(reference_path, seamless_code):

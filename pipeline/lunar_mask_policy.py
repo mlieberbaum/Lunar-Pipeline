@@ -39,7 +39,9 @@ def apply_masks(valid,masks,y,x,size):
     for mask in masks:
         coordinate=x if mask['axis']=='x' else y
         if mask['kind']=='path':
-            # Traced seam: excluded span [low, high] interpolated along rows.
+            # Traced seam span [low, high] interpolated along rows, excluded
+            # whole: a wide span is a sliver of another image strip whose
+            # (often low-sun) relief stands out against both neighbours.
             low=np.interp(y,mask['rows'],mask['low'])-mask['guard']
             high=np.interp(y,mask['rows'],mask['high'])+mask['guard']
             distance=np.maximum(low-x,x-high)

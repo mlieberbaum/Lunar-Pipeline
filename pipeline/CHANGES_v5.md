@@ -39,13 +39,19 @@ All source handling goes through `lunar_source.py` and `lunar_geometry.py`.
    field. The Orbiter reference is resampled onto the anchor grid instead of
    shifting Kaguya, so tile edges keep real data. Falls back to the Seamless
    grid if Morning cannot be registered.
-5. **Seams.** Seams are traced row by row (they wander tens of pixels).
-   Only the traced join plus 16 px is excluded (v4.1 removed ~700 px around
+5. **Seams.** Seams are traced row by row (they wander tens of pixels),
+   using steps in brightness and in texture contrast so narrow slivers of a
+   third, low-sun strip are excluded with the join. Only the traced span
+   plus 16 px is excluded (v4.1 removed ~700 px around
    a fixed column). Local means are computed separately on each side so a
    brightness step between strips never leaks into the detail.
-6. **Resampling.** Cubic-spline sampling replaces bicubic resize plus
+6. **Shadows and penumbra.** Log detail is smoothly limited (tanh, about
+   x0.37..x2.7), so near-black penumbra samples cannot print dark slots.
+   Where no product has data and the reference is dark (permanent shadow),
+   the reference tone is kept instead of synthetic texture.
+7. **Resampling.** Cubic-spline sampling replaces bicubic resize plus
    bilinear shift; reduces an 8.26 px beat grid (3600 vs 4096 px/deg).
-7. Registration and strip detection still run on a stretched preview; all
+8. Registration and strip detection still run on a stretched preview; all
    repair stages remain as a safety net and now act on far fewer pixels.
 
 ## Inputs
@@ -58,3 +64,19 @@ not stretched previews.
 `*.diagnostics.json` adds `geometry` (anchor, seam traces, field ranges),
 `detail_gain_field_percentiles_5_50_95`, per-source `detail_gain`.
 Set `LUNAR_DEBUG_DIR` to keep intermediate masks.
+
+## Results on the sample tiles (pixels changed by repair stages)
+
+| tile | v4.1 | v5 |
+|------|------|----|
+| 217h | 5.3% | 0.01% |
+| 407a | 5.4% | 0.46% |
+| 407g | 9.7% | 1.6% |
+
+## Known open items
+
+- Wide seam bands filled with Morning texture can read as a slightly
+  smoother or speckled vertical band.
+- Mosaic patches inside Seamless that are not north-south seams (e.g. a
+  higher-sun patch on a crater floor) can leave a faint outline.
+- Neighbor-tile boundaries (aprons) not yet addressed.

@@ -318,15 +318,20 @@ def trace_seams(code, strips, scale, size=N):
             if ok.mean() < .8:
                 continue
             lv = np.where(ok, np.log(np.maximum(v, ls.MEAN_FLOOR)), np.nan)
-            p = np.nanmedian(lv, axis=0)
-            if not np.all(np.isfinite(p)):
-                p = np.where(np.isfinite(p), p, np.nanmedian(p))
+            # Two column profiles: brightness (median log) and texture contrast
+            # (median absolute horizontal log gradient). A sliver of a low-sun
+            # strip can match its neighbours in brightness but not in contrast.
+            grad = np.abs(np.diff(lv, axis=1, append=lv[:, -1:]))
             k = 6
-            c = np.cumsum(np.concatenate([[0], p]))
-            left = (c[k:-k] - c[:-2 * k]) / k; right = (c[2 * k:] - c[k:-k]) / k
-            step = np.abs(right - left)
-            base = np.median(step); spread = 1.4826 * np.median(np.abs(step - base)) + 1e-4
-            strong = np.flatnonzero(step > base + 6 * spread)
+            strong = np.zeros(0, int)
+            for p in (np.nanmedian(lv, axis=0), np.log(np.nanmedian(grad, axis=0) + 1e-3)):
+                if not np.all(np.isfinite(p)):
+                    p = np.where(np.isfinite(p), p, np.nanmedian(p))
+                c = np.cumsum(np.concatenate([[0], p]))
+                left = (c[k:-k] - c[:-2 * k]) / k; right = (c[2 * k:] - c[k:-k]) / k
+                step = np.abs(right - left)
+                base = np.median(step); spread = 1.4826 * np.median(np.abs(step - base)) + 1e-4
+                strong = np.concatenate([strong, np.flatnonzero(step > base + 6 * spread)])
             if len(strong):
                 lows[i] = x0 + k + strong.min(); highs[i] = x0 + k + strong.max()
         good = np.isfinite(lows)

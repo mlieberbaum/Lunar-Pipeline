@@ -104,6 +104,16 @@ class Trial:
                 aligned[start:end]=values;validmap[start:end]=valid;availability[start:end]|=valid
             aligned.flush();validmap.flush();del aligned,validmap
             self.log('Aligned',name)
+        # Permanent shadow: no Kaguya product has data and the reference is
+        # dark too. The honest output is the reference's own smooth tone, so
+        # these pixels are not sent to synthetic texture repair.
+        reference=self.load('reference');shadow=0
+        for start,end,lo,hi,sl in self.stripes(halo=48,block=1024):
+            dark=gaussian_filter(np.asarray(reference[lo:hi],dtype='float32')/255,16)[sl]<ls.SHADOW_REFERENCE_LEVEL
+            settle=dark&~availability[start:end]
+            shadow+=int(np.count_nonzero(settle));availability[start:end]|=settle
+        self.report['dark_no_data_kept_reference_pixels']=shadow
+        del reference
         availability.flush();del availability,sources;gc.collect()
         self.report['transforms_yx']={k:v.tolist() for k,v in transforms.items()}
         current=self.load('current');reference=self.load('reference');old=self.load('old_support');support=self.load('support')
