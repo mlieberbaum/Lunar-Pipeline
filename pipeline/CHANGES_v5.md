@@ -74,7 +74,7 @@ Set `LUNAR_DEBUG_DIR` to keep intermediate masks.
 | tile | v4.1 | v5 |
 |------|------|----|
 | 217h | 5.3% | 0.01% |
-| 407a | 5.4% | 0.46% |
+| 407a | 5.4% | 0.45% |
 | 407g | 9.7% | 1.6% |
 
 ## Known open items
