@@ -1,0 +1,72 @@
+"""Run base blending, measured-detail recovery and the complete refinement."""
+from pathlib import Path
+import contextlib
+import json
+import tempfile
+import time
+from lunar_detect import Settings
+from lunar_io import reuse_sources, release_blend_fields
+from lunar_workspace import mapping_scope, claim_output
+
+
+def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
+                  settings=Settings(), source_workers=1):
+    from lunar_texture_auto import build_base_texture
+    from repair_lunar_detail import repair
+    from full_tile_trial import Trial
+
+    output = Path(output).resolve()
+    paths = [Path(p).resolve() for p in [orbiter, seamless, morning, evening]]
+    if output in paths:
+        raise ValueError('Output cannot overwrite an input.')
+    if output.exists() or output.with_suffix('.diagnostics.json').exists():
+        raise FileExistsError('Output or diagnostics already exist.')
+    if not output.parent.is_dir():
+        raise ValueError('Output folder does not exist.')
+    if source_workers not in (1, 2, 3):
+        raise ValueError('source_workers must be 1, 2, or 3.')
+    orbiter, seamless, morning, evening = map(str, paths)
+    with tempfile.TemporaryDirectory(prefix='lunar_work_', dir=output.parent) as folder, mapping_scope(), reuse_sources(Path(folder)/'sources'):
+        work = Path(folder)
+        base = work / 'base.npy'
+        candidate = work / 'candidate.npy'
+        # Stream quiet logs to disk rather than retaining them in memory.
+        with open(work / 'processing.log', 'w') as log:
+            with contextlib.redirect_stdout(log) if quiet else contextlib.nullcontext():
+                before=time.perf_counter()
+                base_report = build_base_texture(orbiter, seamless, morning, evening,
+                    base, quiet=quiet, settings=settings, source_workers=source_workers)
+                base_seconds=time.perf_counter()-before;before=time.perf_counter()
+                repair_report = repair(orbiter, seamless, morning, evening, base,
+                    base.with_suffix('.diagnostics.json'), candidate)
+                recovery_seconds=time.perf_counter()-before
+                release_blend_fields()
+                config = dict(orbiter=orbiter, seamless=seamless, morning=morning,
+                    evening=evening, current=str(candidate),
+                    old_support=str(candidate.with_suffix('.old-detail-support.npy')),
+                    support=str(candidate.with_suffix('.measured-support.npy')),
+                    repair_strength=str(candidate.with_suffix('.repair-mask.npy')),
+                    original_diagnostics=str(base.with_suffix('.diagnostics.json')),
+                    repair_diagnostics=str(candidate.with_suffix('.diagnostics.json')),
+                    work_folder=str(work / 'cache'), output=str(output),
+                    size=12288, filter_workers=source_workers)
+                trial = Trial(config)
+                trial.run()
+        report = trial.report
+        report['base_processing'] = base_report
+        report['measured_detail_recovery'] = repair_report
+        report['stage_seconds']['base_processing']=base_seconds
+        report['stage_seconds']['measured_detail_recovery']=recovery_seconds
+        report['algorithm'] = 'lunar-complete-pipeline-4'
+        report['runtime_version'] = '4.1'
+        output.with_suffix('.diagnostics.json').write_text(json.dumps(report, indent=2))
+    return report
+
+def build_texture(orbiter,seamless,morning,evening,output,quiet=False,settings=Settings(),source_workers=1):
+    from threadpoolctl import threadpool_limits
+    started=time.perf_counter()
+    with claim_output(Path(output).resolve()), threadpool_limits(limits=1):
+        report=_build_texture(orbiter,seamless,morning,evening,output,quiet,settings,source_workers)
+    report['total_elapsed_seconds']=time.perf_counter()-started
+    Path(output).with_suffix('.diagnostics.json').write_text(json.dumps(report,indent=2))
+    return report
