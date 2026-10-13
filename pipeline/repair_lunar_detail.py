@@ -21,7 +21,12 @@ N = 12288
 
 
 def refined_masks(regions):
-    """Exclude detected intervals plus 32 px, with a 64 px transition."""
+    """Seamless seam masks: only the detected join is excluded."""
+    return ls.narrow_masks(regions, N)
+
+
+def _legacy_refined_masks(regions):
+    """v4: exclude detected intervals plus 32 px, with a 64 px transition."""
     masks = []
     for region in regions:
         low, high = region['start_fraction'] * N, region['end_fraction'] * N
@@ -36,10 +41,11 @@ def refined_masks(regions):
     return masks
 
 
-def coordinates(transform, yy, xx):
-    sy = transform[0, 0] + transform[1, 0] * yy + transform[2, 0] * xx
-    sx = transform[0, 1] + transform[1, 1] * yy + transform[2, 1] * xx
-    return yy - sy, xx - sx
+def coordinates(transform, yy, xx, name=None):
+    """Source read position for output (yy, xx); measured local fields
+    (lunar_geometry) take precedence over the affine transform."""
+    import lunar_geometry
+    return lunar_geometry.source_coords(name, transform, yy, xx)
 
 
 def local_agreement(seamless, evening, seamless_transform, evening_transform):
@@ -47,8 +53,8 @@ def local_agreement(seamless, evening, seamless_transform, evening_transform):
     size = 1536
     yy, xx = np.mgrid[:size, :size].astype(np.float32) * (N / size)
     images = []
-    for source, transform in [(seamless, seamless_transform), (evening, evening_transform)]:
-        sy, sx = coordinates(transform, yy, xx)
+    for name, source, transform in [('Seamless', seamless, seamless_transform), ('Evening', evening, evening_transform)]:
+        sy, sx = coordinates(transform, yy, xx, name)
         coords = [sy * size / N, sx * size / N]
         v = ndi.map_coordinates(thumbnail(ls.preview(np.asarray(source)), size) / 65535, coords, order=1, mode='nearest')
         ok = ndi.map_coordinates(thumbnail((np.asarray(source) > 0).astype(np.uint8) * 255, size) / 255,
@@ -69,13 +75,13 @@ def local_agreement(seamless, evening, seamless_transform, evening_transform):
 
 
 def recovered_detail(name, source, transform, masks, yy, xx, confidence=None, gain=1.0):
-    sy, sx = coordinates(transform, yy, xx)
+    sy, sx = coordinates(transform, yy, xx, name)
     v, ok = ls.sample(source, sy, sx)
     valid = apply_masks(ok.astype(np.float32), masks, sy, sx, N)
     # Keep broad Evening illumination changes out of the new contribution.
     sigma = 8 if name == 'Evening' else 32
     denominator = gaussian_filter(valid, sigma)
-    detail = ls.detail(v, valid, sigma, -gain if name == 'Evening' else gain)
+    detail = ls.detail(v, valid, sigma, (-gain if name == 'Evening' else gain) * ls.gain_at(yy, xx, N))
     # No contribution from invalid samples or directly along their boundaries.
     distance = ndi.distance_transform_edt(np.pad(valid > 0, 32, constant_values=True))[32:-32, 32:-32]
     weight = valid * np.clip(distance / 32, 0, 1) * np.clip(denominator / .7, 0, 1)
@@ -185,7 +191,7 @@ def repair(orbiter, seamless, morning, evening, processed, diagnostics, output):
                      'Seamless':np.zeros_like(yy),'Evening':np.zeros_like(yy)}
         new_details, new_weights = details.copy(), weights.copy()
         new_details['Seamless'], new_weights['Seamless'] = recovered_detail('Seamless', sources['Seamless'],
-                   transforms['Seamless'], refined_masks(recorded['Seamless']['strips']), yy, xx)
+                   transforms['Seamless'], recorded['Seamless']['masks'], yy, xx)
         if evening_transform is not None:
             new_details['Evening'], new_weights['Evening'] = recovered_detail('Evening', sources['Evening'],
                      evening_transform, masks_from_regions(recorded['Evening']['strips']), yy, xx, confidence,

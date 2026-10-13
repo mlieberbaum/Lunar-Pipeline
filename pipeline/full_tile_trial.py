@@ -93,10 +93,10 @@ class Trial:
         availability=self.create('availability','bool');availability[:]=False
         for name in self.source_names:
             aligned=self.create('aligned_'+name,'uint16');validmap=self.create('valid_'+name,'bool')
-            masks=(refined_masks(original[name]['strips']) if name=='Seamless' else masks_from_regions(original[name]['strips']) if name=='Evening' else original[name]['masks'])
+            masks=(original[name]['masks'] if name=='Seamless' else masks_from_regions(original[name]['strips']) if name=='Evening' else original[name]['masks'])
             for start,end,lo,hi,sl in self.stripes(block=512):
                 yy,xx=np.mgrid[start:end,:self.n].astype(np.float32)
-                sy,sx=coordinates(transforms[name],yy,xx)
+                sy,sx=coordinates(transforms[name],yy,xx,name)
                 v,valid=ls.sample(sources[name],sy,sx)
                 values=np.rint(v*65535).astype('uint16')
                 valid=apply_masks(valid.astype('float32'),masks,sy,sx,self.n)>0
@@ -323,7 +323,8 @@ class Trial:
             def source_fields(name):
                 raw=aligned[name][lo:hi,left:right].astype('float32')/65535;valid=validity[name][lo:hi,left:right].astype('float32')
                 den=gaussian_filter(valid,16);mean=gaussian_filter(raw*valid,16)/np.maximum(den,1e-6)
-                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*self.detail_gains.get(name,1.0))
+                gy,gx=np.mgrid[lo:hi,left:right]
+                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*self.detail_gains.get(name,1.0)*ls.gain_at(gy,gx,self.n))
                 source_std=np.sqrt(gaussian_filter(detail*detail*valid,32)/np.maximum(gaussian_filter(valid,32),1e-6))
                 detail*=np.clip(desired/np.maximum(source_std,1e-6),.025,1)
                 fade=np.clip(ndi.distance_transform_edt(valid>0)/32,0,1)

@@ -12,6 +12,8 @@ import numpy as np
 from scipy import ndimage as ndi
 
 DUMMY, LOW_SATURATION, HIGH_SATURATION = 0, 1, 32767
+# Product whose grid defines the output (set by the pipeline).
+ANCHOR = 'Seamless'
 CODE_PER_DN = 2
 # Detail model (log reflectance, fixed for every tile):
 #   factor = exp(MID_GAIN * (G2 - Gs) + FINE_GAIN * (log v - G2))
@@ -80,6 +82,52 @@ def _masked_mean(a, w, sigma):
     return num / np.maximum(gaussian_filter(w, sigma), 1e-5)
 
 
+def _regions(w, max_regions=6):
+    """Large disconnected pieces of the valid area, e.g. the two sides of an
+    excluded mosaic seam. Local means are computed per piece so a brightness
+    step between mosaic strips never leaks into the detail of either side."""
+    labels, count = ndi.label(w > 0)
+    if count <= 1:
+        return None
+    sizes = np.bincount(labels.ravel())[1:]
+    large = np.argsort(sizes)[::-1][:max_regions]
+    large = large[sizes[large] >= max(4096, .01 * w.size)] + 1
+    if len(large) <= 1:
+        return None
+    pieces = [labels == label for label in large]
+    rest = ~np.logical_or.reduce(pieces)
+    return pieces + ([rest] if rest.any() else [])
+
+
+def _piecewise_mean(a, w, sigma, pieces):
+    if pieces is None:
+        return _masked_mean(a, w, sigma)
+    out = np.zeros(a.shape, np.float32)
+    for piece in pieces:
+        out[piece] = _masked_mean(a, w * piece, sigma)[piece]
+    return out
+
+
+def narrow_masks(regions, size=12288, guard=16.0, feather=8.0):
+    """Exclude only the detected seam interval plus a small guard.
+
+    Data on both sides of a mosaic seam is valid; only the join is not. The
+    sides are normalized separately (see _regions), and the Orbiter reference
+    supplies continuous low-frequency tone across the join."""
+    masks = []
+    for r in regions:
+        low, high = r['start_fraction'] * size, r['end_fraction'] * size
+        common = {'axis': r['axis'], 'feather': feather}
+        if r['start_fraction'] < .025:
+            masks.append(dict(common, kind='low_edge', core=high + guard))
+        elif r['end_fraction'] > .975:
+            masks.append(dict(common, kind='high_edge', core=size - low + guard))
+        else:
+            masks.append(dict(common, kind='interior', center=(low + high) / 2,
+                              halfwidth=(high - low) / 2 + guard))
+    return masks
+
+
 def detail(v, valid, sigma, gain=1.0):
     """Multiplicative detail of v about its local mean at scale sigma.
 
@@ -87,8 +135,9 @@ def detail(v, valid, sigma, gain=1.0):
     receive zero detail. gain is a per-source contrast match (1 for Seamless)."""
     w = np.asarray(valid, np.float32)
     lv = np.log(np.maximum(v, MEAN_FLOOR)).astype(np.float32)
-    coarse = _masked_mean(lv, w, sigma)
-    fine = _masked_mean(lv, w, FINE_SIGMA)
+    pieces = _regions(w)
+    coarse = _piecewise_mean(lv, w, sigma, pieces)
+    fine = _piecewise_mean(lv, w, FINE_SIGMA, pieces)
     log_factor = gain * (MID_GAIN * (fine - coarse) + FINE_GAIN * (lv - fine))
     factor = np.minimum(np.exp(log_factor), FACTOR_MAX)
     return ((factor - 1) / BLEND * (w > 0)).astype(np.float32)
@@ -144,12 +193,13 @@ def load_gains(folder):
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def align_reference(orbiter, seamless_code, target, size=12288):
-    """Resample the Orbiter reference onto the Seamless grid.
+def align_reference(orbiter, seamless_code, target, size=12288, name='Seamless'):
+    """Resample the Orbiter reference onto the anchor product's grid.
 
-    Kaguya tiles abut exactly on their own grid, so Seamless is kept fixed and
-    the low-resolution reference is shifted instead (about one reference pixel).
-    Shifting Kaguya would leave edge strips with no source data in every tile.
+    Kaguya tiles abut exactly on their own grid, so the anchor (Morning, or
+    Seamless when Morning is unusable) is kept fixed and the low-resolution
+    reference is shifted instead (about one reference pixel). Shifting Kaguya
+    would leave edge strips with no source data in every tile.
     Returns (path, transform) or (orbiter, None) if registration is rejected."""
     from PIL import Image
     from lunar_registration import estimate_registration, RegistrationRejected
@@ -158,9 +208,10 @@ def align_reference(orbiter, seamless_code, target, size=12288):
             raise ValueError('Orbiter must be uint8.')
         reference = np.asarray(image.convert('L'))
     view = preview(seamless_code)
-    view = np.clip(np.rint(np.asarray(Image.fromarray(view).convert('F').resize((size, size), Image.Resampling.BICUBIC))), 0, 65535).astype('uint16')
+    if view.shape[0] != size:
+        view = np.clip(np.rint(np.asarray(Image.fromarray(view).convert('F').resize((size, size), Image.Resampling.BICUBIC))), 0, 65535).astype('uint16')
     try:
-        transform, _ = estimate_registration(reference, view, 'Seamless')
+        transform, _ = estimate_registration(reference, view, name)
     except RegistrationRejected as error:
         print('Reference alignment skipped:', error, flush=True)
         return orbiter, None
@@ -174,6 +225,57 @@ def align_reference(orbiter, seamless_code, target, size=12288):
     sx = transform[0, 1] + transform[1, 1] * y + transform[2, 1] * x
     shifted = ndi.map_coordinates(reference.astype(np.float32), [U + sy * k, V + sx * k], order=3, mode='nearest')
     Image.fromarray(np.clip(np.rint(shifted), 0, 255).astype(np.uint8), 'L').save(target)
-    print('Reference aligned to Seamless; shift at centre (px):',
+    print('Reference aligned to', name + '; shift at centre (px):',
           [round(float(transform[0, i] + (transform[1, i] + transform[2, i]) * size / 2), 2) for i in (0, 1)], flush=True)
     return str(target), np.asarray(transform)
+
+
+# LROC-anchored local detail gain. Kaguya relative contrast is compared with
+# the Orbiter reference in the band both resolve (1-4 reference pixels), with
+# a smooth window, so detail amplitude follows the reference appearance on any
+# terrain. GAIN_REFERENCE_RATIO is the reference/Kaguya ratio at which the
+# fixed gains above apply unchanged (typical mare, tile 217h).
+GAIN_REFERENCE_RATIO = 1.2
+GAIN_LIMITS = (.45, 1.2)
+GAIN_WINDOW = 40.0  # reference pixels (~3.5 km)
+
+
+def gain_field(reference_path, seamless_code):
+    """Return a reference-resolution map of detail gain multipliers."""
+    from PIL import Image
+    with Image.open(reference_path) as image:
+        ref = np.asarray(image.convert('L'), np.float32) / 255
+    n = ref.shape[0]
+    code = np.asarray(seamless_code)
+    valid = (code > 0).astype(np.float32)
+    def area(a):
+        return np.asarray(Image.fromarray(a).resize((n, n), Image.Resampling.BOX), np.float32)
+    w = area(valid)
+    s = area(code.astype(np.float32) / 65535 * valid) / np.maximum(w, 1e-6)
+    w = (w > .999).astype(np.float32)
+    def band(a):
+        g1 = ndi.gaussian_filter(a, 1.0); g4 = ndi.gaussian_filter(a, 4.0)
+        return (g1 - g4) / np.maximum(g4, 1e-4)
+    br, bs = band(ref), band(s)
+    def local_rms(b):
+        return np.sqrt(np.maximum(ndi.gaussian_filter(b * b * w, GAIN_WINDOW), 0)
+                       / np.maximum(ndi.gaussian_filter(w, GAIN_WINDOW), 1e-6))
+    ratio = local_rms(br) / np.maximum(local_rms(bs), 1e-6)
+    return np.clip(ratio / GAIN_REFERENCE_RATIO, *GAIN_LIMITS).astype(np.float32)
+
+
+_gain = {'field': None}
+
+
+def set_gain_field(field):
+    _gain['field'] = None if field is None else np.asarray(field, np.float32)
+
+
+def gain_at(yy, xx, size=12288):
+    """Gain multiplier at output coordinates (1 when no field is set)."""
+    field = _gain['field']
+    if field is None:
+        return np.float32(1)
+    k = field.shape[0] / size
+    return ndi.map_coordinates(field, [(np.asarray(yy) + .5) * k - .5, (np.asarray(xx) + .5) * k - .5],
+                               order=1, mode='nearest').astype(np.float32)

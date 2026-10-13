@@ -38,6 +38,13 @@ def masks_from_regions(regions,size=12288,policy=MaskPolicy()):
 def apply_masks(valid,masks,y,x,size):
     for mask in masks:
         coordinate=x if mask['axis']=='x' else y
+        if mask['kind']=='path':
+            # Traced seam: excluded span [low, high] interpolated along rows.
+            low=np.interp(y,mask['rows'],mask['low'])-mask['guard']
+            high=np.interp(y,mask['rows'],mask['high'])+mask['guard']
+            distance=np.maximum(low-x,x-high)
+            valid*=np.clip(distance/mask['feather'],0,1)
+            continue
         if mask['kind']=='interior':
             factor=np.clip((np.abs(coordinate-mask['center'])-mask['halfwidth'])/mask['feather'],0,1)
         elif mask['kind']=='low_edge':

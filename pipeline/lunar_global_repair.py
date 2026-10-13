@@ -59,7 +59,8 @@ def run(image_path,old_path,support_path,repair_path,folder,reference_path=None,
                 raw=aligned[name][roi].astype('float32')/65535
                 valid=validmaps[name][roi]
                 den=gaussian_filter(valid.astype('float32'),16);mean=gaussian_filter(raw*valid,16)/np.maximum(den,1e-6)
-                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*ls.load_gains(source_folder).get(name,1.0))
+                gy,gx=np.mgrid[lo:hi,left:right]
+                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*ls.load_gains(source_folder).get(name,1.0)*ls.gain_at(gy,gx,n))
                 fine=detail-gaussian_filter(detail,8);std=np.sqrt(np.maximum(gaussian_filter(fine*fine,8)-gaussian_filter(fine,8)**2,0))
                 good=valid&(std>.65*desired)&~chosen
                 detail*=np.clip(desired/np.maximum(std,1e-6),.5,2)

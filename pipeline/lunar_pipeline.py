@@ -53,7 +53,19 @@ def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
                 before=time.perf_counter()
                 from lunar_texture_auto import load_source
                 from lunar_source import align_reference
-                orbiter, reference_transform = align_reference(orbiter, load_source(seamless, 'Seamless'), work / 'reference_aligned.png')
+                import lunar_geometry, lunar_source
+                from lunar_detect import detect_strips
+                codes = {'Seamless': load_source(seamless, 'Seamless'), 'Morning': load_source(morning, 'Morning'),
+                         'Evening': load_source(evening, 'Evening')}
+                seams, _ = detect_strips(lunar_source.preview(codes['Seamless']), settings)
+                anchor, geometry_report = lunar_geometry.align_products(codes, seams, 10800 / 12288)
+                lunar_source.ANCHOR = anchor
+                orbiter, reference_transform = align_reference(orbiter, codes[anchor], work / 'reference_aligned.png', name=anchor)
+                del codes
+                import numpy as np, lunar_source
+                gains = lunar_source.gain_field(orbiter, load_source(seamless, 'Seamless'))
+                lunar_source.set_gain_field(gains)
+                np.save(work / 'detail_gain_field.npy', gains)
                 base_report = build_base_texture(orbiter, seamless, morning, evening,
                     base, quiet=quiet, settings=settings, source_workers=source_workers)
                 base_seconds=time.perf_counter()-before;before=time.perf_counter()
@@ -75,7 +87,9 @@ def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
                 _keep_debug(work)
         report = trial.report
         report['base_processing'] = base_report
+        report['geometry'] = geometry_report
         report['reference_alignment_transform_yx'] = None if reference_transform is None else reference_transform.tolist()
+        report['detail_gain_field_percentiles_5_50_95'] = np.percentile(gains, [5, 50, 95]).tolist()
         report['measured_detail_recovery'] = repair_report
         report['stage_seconds']['base_processing']=base_seconds
         report['stage_seconds']['measured_detail_recovery']=recovery_seconds
@@ -90,5 +104,9 @@ def build_texture(orbiter,seamless,morning,evening,output,quiet=False,settings=S
     with claim_output(Path(output).resolve()), threadpool_limits(limits=1):
         report=_build_texture(orbiter,seamless,morning,evening,output,quiet,settings,source_workers)
     report['total_elapsed_seconds']=time.perf_counter()-started
+    import lunar_source, lunar_geometry
+    lunar_source.set_gain_field(None)
+    lunar_geometry.clear()
+    lunar_source.ANCHOR = 'Seamless'
     Path(output).with_suffix('.diagnostics.json').write_text(json.dumps(report,indent=2))
     return report

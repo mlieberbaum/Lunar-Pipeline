@@ -34,7 +34,8 @@ def render(t):
             for name in t.source_names:
                 raw=aligned[name][roi].astype('float32')/65535;valid=validmaps[name][roi].astype('float32')
                 den=gaussian_filter(valid,16);mean=gaussian_filter(raw*valid,16)/np.maximum(den,1e-6)
-                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*ls.load_gains(t.root).get(name,1.0))
+                gy,gx=np.mgrid[lo:hi,left:right]
+                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*ls.load_gains(t.root).get(name,1.0)*ls.gain_at(gy,gx,n))
                 std=np.sqrt(gaussian_filter(detail*detail*valid,32)/np.maximum(gaussian_filter(valid,32),1e-6))
                 detail*=np.clip(desired/np.maximum(std,1e-6),.025,1)
                 fade=np.clip(nd.distance_transform_edt(valid>0)/32,0,1)

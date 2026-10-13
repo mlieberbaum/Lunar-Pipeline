@@ -1,0 +1,60 @@
+# Lunar pipeline v5: changes from v4.1
+
+Entry point, MATLAB wrapper and pinned dependencies are unchanged:
+`build_texture(orbiter, seamless, morning, evening, output, source_workers=1)`.
+Processing remains deterministic and conventional (filters, resampling,
+registration, masks); no generative or trained models.
+
+## Why
+
+v4.1 stretched each Kaguya product to its own 0.5/99.5 percentiles and then
+judged pixel validity on the stretched values (`.01 < v < .995`). Valid but
+dark crater floors and bright walls were declared unusable and sent through
+synthetic quilting and several repair-of-repair stages: the crater-bottom
+splotches and "obviously repaired" patches. The same stretch made detail
+contrast depend on each tile's histogram (seams between subtiles).
+
+## What changed
+
+All source handling goes through `lunar_source.py` and `lunar_geometry.py`.
+
+1. **Validity from the archive labels.** Sources are stored as codes linear
+   in label DN (`2*DN`). DUMMY (0), low saturation (1) and high saturation
+   (32767) become 0. A sample is usable exactly when its code is non-zero.
+2. **One detail definition, fixed gains.** Detail is multiplicative detail
+   of log reflectance about a local mean: mid scales (2-32 px) gain 1.5,
+   fine scales (<2 px) gain 2.2. No clipping plateaus, no unsharp-mask
+   halos. Morning/Evening are scaled to Seamless contrast measured where
+   both are valid, and contribute texture only (<= 8 px) so low-sun
+   shading cannot print as streaks.
+3. **LROC-anchored local gain.** Kaguya relative contrast is compared with
+   the Orbiter reference in the band both resolve, over ~3.5 km windows,
+   and detail amplitude follows the reference (mare unchanged, highland
+   strips with harsh relief toned down ~25%).
+4. **Geometry.** Seamless mosaic strips carry along-track errors of up to
+   ~20 px varying across each strip, with steps at seams (tears). Morning
+   (one orbit, consistent with the reference) now defines the output grid;
+   Seamless is warped into it with a displacement field measured on a
+   512 px grid and filtered only within each strip; Evening gets its own
+   field. The Orbiter reference is resampled onto the anchor grid instead of
+   shifting Kaguya, so tile edges keep real data. Falls back to the Seamless
+   grid if Morning cannot be registered.
+5. **Seams.** Seams are traced row by row (they wander tens of pixels).
+   Only the traced join plus 16 px is excluded (v4.1 removed ~700 px around
+   a fixed column). Local means are computed separately on each side so a
+   brightness step between strips never leaks into the detail.
+6. **Resampling.** Cubic-spline sampling replaces bicubic resize plus
+   bilinear shift; reduces an 8.26 px beat grid (3600 vs 4096 px/deg).
+7. Registration and strip detection still run on a stretched preview; all
+   repair stages remain as a safety net and now act on far fewer pixels.
+
+## Inputs
+
+Use the original `.img` files. PNG inputs must contain unmodified label DN,
+not stretched previews.
+
+## Diagnostics
+
+`*.diagnostics.json` adds `geometry` (anchor, seam traces, field ranges),
+`detail_gain_field_percentiles_5_50_95`, per-source `detail_gain`.
+Set `LUNAR_DEBUG_DIR` to keep intermediate masks.

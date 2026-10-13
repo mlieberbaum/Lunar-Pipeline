@@ -55,33 +55,47 @@ def prepare(orbiter, paths, settings=Settings(), quiet=False):
             sources[name]=resize_source(code,N)
             view=np.clip(np.rint(np.asarray(Image.fromarray(view).convert('F').resize((N,N),Image.Resampling.BICUBIC))),0,65535).astype('uint16')
         else:sources[name]=code
+        import lunar_geometry
+        measured=name in lunar_geometry.FIELDS or name==ls.ANCHOR
         try:
             transform,registration=estimate_registration(reference,view,name)
         except RegistrationRejected as error:
-            del sources[name]
-            report['sources'][name] = {
-                'input_path': str(Path(path).resolve()),
-                'input_size_bytes': Path(path).stat().st_size,
-                'enabled': False, 'rejection_reason': str(error),
-                'registration': error.patches,
-                'strips': strips, 'strip_profiles': profiles}
-            if not quiet:
-                print('Excluded source:', error, flush=True)
-            continue
-        if name=='Seamless' and Path(orbiter).name=='reference_aligned.png':
-            # Reference already resampled onto the Seamless grid; keep Seamless fixed.
-            report.setdefault('seamless_residual_transform_yx',np.asarray(transform).tolist())
+            if not measured:
+                del sources[name]
+                report['sources'][name] = {
+                    'input_path': str(Path(path).resolve()),
+                    'input_size_bytes': Path(path).stat().st_size,
+                    'enabled': False, 'rejection_reason': str(error),
+                    'registration': error.patches,
+                    'strips': strips, 'strip_profiles': profiles}
+                if not quiet:
+                    print('Excluded source:', error, flush=True)
+                continue
+            # Geometry comes from the measured local field, not this global check.
+            transform,registration=np.zeros((3,2)),error.patches
+        if measured and Path(orbiter).name=='reference_aligned.png':
+            # The anchor defines the grid and the others use measured local
+            # fields (lunar_geometry); the global estimate is diagnostic only.
+            report.setdefault('global_estimates_yx',{})[name]=np.asarray(transform).tolist()
             transform=np.zeros((3,2))
         transforms[name]=transform
         report['sources'][name]={'input_path':str(Path(path).resolve()),
             'input_size_bytes':Path(path).stat().st_size,'enabled':True,'registration':registration,
             'transform_yx':transform.tolist(),'strips':strips,
-            'masks':masks_from_regions(strips,N),'strip_profiles':profiles}
+            'masks':seamless_masks(strips,N) if name=='Seamless' else masks_from_regions(strips,N),'strip_profiles':profiles}
         if not quiet:print(name,'registered:',len(registration),'patches;',len(strips),'suspect strips',flush=True)
     match_detail_gains(sources,transforms,report,N)
     return sources,transforms,report
 
-def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=32):
+def seamless_masks(strips,N):
+    """Traced seam paths when available; narrow axis-aligned bands otherwise."""
+    import lunar_geometry
+    if lunar_geometry.SEAM_PATHS:
+        others=[r for r in strips if r['axis']!='x']
+        return lunar_geometry.path_masks(lunar_geometry.SEAM_PATHS)+ls.narrow_masks(others,N)
+    return ls.narrow_masks(strips,N)
+
+def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=8):
     """Scale Morning/Evening relative detail to Seamless contrast.
 
     Measured at full resolution in a fixed grid of windows where both sources
@@ -99,8 +113,9 @@ def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=32):
                 yy,xx=np.mgrid[y0:y0+size,x0:x0+size].astype(np.float32)
                 fields={}
                 for k in ['Seamless',name]:
-                    tr=transforms[k];sy=tr[0,0]+tr[1,0]*yy+tr[2,0]*xx;sx=tr[0,1]+tr[1,1]*yy+tr[2,1]*xx
-                    v,ok=ls.sample(sources[k],yy-sy,xx-sx);w=ok.astype(np.float32)
+                    import lunar_geometry
+                    sy,sx=lunar_geometry.source_coords(k,transforms[k],yy,xx)
+                    v,ok=ls.sample(sources[k],sy,sx);w=ok.astype(np.float32)
                     mean=gaussian_filter(v*w,sigma)/np.maximum(gaussian_filter(w,sigma),1e-5)
                     fields[k]=((v-mean)/np.maximum(mean,ls.MEAN_FLOOR),ok)
                 both=fields['Seamless'][1]&fields[name][1]
@@ -116,15 +131,16 @@ def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=32):
         print(name,'detail gain relative to Seamless',round(gain,3),flush=True)
 
 def source_detail(name,a,transform,strips,yy,xx,N,sigma,settings,gain=1.0):
-    tr = transform
-    sy = tr[0,0]+tr[1,0]*yy+tr[2,0]*xx
-    sx = tr[0,1]+tr[1,1]*yy+tr[2,1]*xx
-    rawx = xx-sx
-    v, ok = ls.sample(a,yy-sy,rawx)
-    valid = apply_masks(ok.astype(np.float32),strips,yy-sy,rawx,N)
+    import lunar_geometry
+    sy, sx = lunar_geometry.source_coords(name,transform,yy,xx)
+    v, ok = ls.sample(a,sy,sx)
+    valid = apply_masks(ok.astype(np.float32),strips,sy,sx,N)
     denom = gaussian_filter(valid,sigma)
+    # Low-sun products fill gaps with texture only (<= 8 px): their broad
+    # shading would print as streaks; broad tone comes from the reference.
+    detail_sigma = sigma if name=='Seamless' else min(sigma,8)
     # Evening relief has opposite illumination; use its relief with reversed polarity.
-    d = ls.detail(v,valid,sigma,-gain if name=='Evening' else gain)
+    d = ls.detail(v,valid,detail_sigma,(-gain if name=='Evening' else gain)*ls.gain_at(yy,xx,N))
 
     weight = gaussian_filter(valid,4)*np.clip(denom/.7,0,1)
     return d, weight
