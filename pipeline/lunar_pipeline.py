@@ -23,7 +23,10 @@ def _keep_debug(work):
     for name in names:
         source = work / name
         if source.exists():
-            shutil.copyfile(source, target / name.replace('/', '_'))
+            try:
+                shutil.copyfile(source, target / name.replace('/', '_'))
+            except OSError as error:  # debugging aid only; never fail a run
+                print('Debug copy skipped:', name, error, flush=True)
 
 
 def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,

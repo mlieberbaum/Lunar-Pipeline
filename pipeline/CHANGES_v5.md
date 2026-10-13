@@ -30,7 +30,11 @@ All source handling goes through `lunar_source.py` and `lunar_geometry.py`.
 3. **LROC-anchored local gain.** Kaguya relative contrast is compared with
    the Orbiter reference in the band both resolve, over ~3.5 km windows,
    and detail amplitude follows the reference (mare unchanged, highland
-   strips with harsh relief toned down ~25%).
+   strips with harsh relief toned down ~25%; never amplified). Detail also
+   responds to reference brightness: bright crater walls and floors get
+   proportionally less (x0.73 at tone .6, x0.48 at 1.0, like v4.1's
+   `(v-m)/(m+.15)`), and deep reference shadows keep a smooth tone with
+   faint texture (x0.35). This keeps large craters calm instead of speckled.
 4. **Geometry.** Seamless mosaic strips carry along-track errors of up to
    ~20 px varying across each strip, with steps at seams (tears). Morning
    (one orbit, consistent with the reference) now defines the output grid;
@@ -75,8 +79,12 @@ Set `LUNAR_DEBUG_DIR` to keep intermediate masks.
 
 ## Known open items
 
-- Wide seam bands filled with Morning texture can read as a slightly
-  smoother or speckled vertical band.
+- Wide seam bands filled with Morning texture can read as a speckled
+  vertical band (softened by a 48 px cross-fade). A mirrored-Seamless fill
+  was tried and rejected: it creates symmetric chevrons on structured
+  terrain such as crater rims. Candidates: short edge mirroring plus
+  attenuated Morning texture; v4.1-style wide masking on the new geometry;
+  quilting restricted to neighbouring Seamless.
 - Mosaic patches inside Seamless that are not north-south seams (e.g. a
   higher-sun patch on a crater floor) can leave a faint outline.
 - Neighbor-tile boundaries (aprons) not yet addressed.

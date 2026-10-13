@@ -240,7 +240,13 @@ def align_reference(orbiter, seamless_code, target, size=12288, name='Seamless')
 # terrain. GAIN_REFERENCE_RATIO is the reference/Kaguya ratio at which the
 # fixed gains above apply unchanged (typical mare, tile 217h).
 GAIN_REFERENCE_RATIO = 1.2
-GAIN_LIMITS = (.45, 1.2)
+GAIN_LIMITS = (.45, 1.0)
+# Brightness response (reference tone B in 0..1): bright walls and floors get
+# proportionally less relative detail, as in v4.1's (v - m) / (m + .15), so
+# they do not turn into high-contrast speckle; deep reference shadows keep a
+# smooth tone with faint texture.
+BRIGHT_PIVOT, BRIGHT_SOFT = .4, .15
+DARK_FLOOR, DARK_LEVEL = .35, .15
 GAIN_WINDOW = 40.0  # reference pixels (~3.5 km)
 # Where no Kaguya product has data and the smoothed reference is below this
 # level (0..1), the region is treated as genuine shadow and keeps the
@@ -269,7 +275,16 @@ def gain_field(reference_path, seamless_code):
         return np.sqrt(np.maximum(ndi.gaussian_filter(b * b * w, GAIN_WINDOW), 0)
                        / np.maximum(ndi.gaussian_filter(w, GAIN_WINDOW), 1e-6))
     ratio = local_rms(br) / np.maximum(local_rms(bs), 1e-6)
-    return np.clip(ratio / GAIN_REFERENCE_RATIO, *GAIN_LIMITS).astype(np.float32)
+    contrast = np.clip(ratio / GAIN_REFERENCE_RATIO, *GAIN_LIMITS)
+    return (contrast * brightness_response(ndi.gaussian_filter(ref, 2.0))).astype(np.float32)
+
+
+def brightness_response(b):
+    """Detail multiplier for reference tone b (1 at typical grey)."""
+    bright = np.minimum(1.0, (BRIGHT_PIVOT + BRIGHT_SOFT) / (b + BRIGHT_SOFT))
+    t = np.clip((b - .03) / DARK_LEVEL, 0, 1)
+    dark = DARK_FLOOR + (1 - DARK_FLOOR) * t * t * (3 - 2 * t)
+    return bright * dark
 
 
 _gain = {'field': None}

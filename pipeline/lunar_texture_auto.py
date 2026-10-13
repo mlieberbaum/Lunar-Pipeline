@@ -87,6 +87,8 @@ def prepare(orbiter, paths, settings=Settings(), quiet=False):
     match_detail_gains(sources,transforms,report,N)
     return sources,transforms,report
 
+SEAM_FADE = 48.0
+
 def seamless_masks(strips,N):
     """Traced seam paths when available; narrow axis-aligned bands otherwise."""
     import lunar_geometry
@@ -143,6 +145,12 @@ def source_detail(name,a,transform,strips,yy,xx,N,sigma,settings,gain=1.0):
     d = ls.detail(v,valid,detail_sigma,(-gain if name=='Evening' else gain)*ls.gain_at(yy,xx,N))
 
     weight = gaussian_filter(valid,4)*np.clip(denom/.7,0,1)
+    seams=[m for m in strips if m.get('kind')=='path']
+    if seams:
+        # Cross-fade into traced seam bands over ~48 px so the filled band
+        # does not read as a distinct stripe; small holes keep tight edges.
+        wide=apply_masks(np.ones_like(valid),[dict(m,feather=SEAM_FADE) for m in seams],sy,sx,N)
+        weight *= wide*wide*(3-2*wide)
     return d, weight
 
 def blend(orbiter,sources,transforms,report,settings=Settings(),quiet=False,source_workers=1,output_size=12288):
