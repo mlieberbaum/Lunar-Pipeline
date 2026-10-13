@@ -15,6 +15,7 @@ from lunar_texture_auto import load_source, source_detail, save_output
 from lunar_detect import Settings, register, pixel_transform, thumbnail, edge_image
 from lunar_mask_policy import apply_masks, masks_from_regions
 from lunar_io import read_array, write_array, blend_fields
+import lunar_source as ls
 
 N = 12288
 
@@ -48,11 +49,13 @@ def local_agreement(seamless, evening, seamless_transform, evening_transform):
     images = []
     for source, transform in [(seamless, seamless_transform), (evening, evening_transform)]:
         sy, sx = coordinates(transform, yy, xx)
-        v = ndi.map_coordinates(thumbnail(source, size) / 65535,
-                                [sy * size / N, sx * size / N], order=1, mode='nearest')
-        images.append((edge_image(v), v))
+        coords = [sy * size / N, sx * size / N]
+        v = ndi.map_coordinates(thumbnail(ls.preview(np.asarray(source)), size) / 65535, coords, order=1, mode='nearest')
+        ok = ndi.map_coordinates(thumbnail((np.asarray(source) > 0).astype(np.uint8) * 255, size) / 255,
+                                 coords, order=1, mode='nearest') > .999
+        images.append((edge_image(v), ok))
     (a, va), (b, vb) = images
-    weight = ((va > .01) & (va < .995) & (vb > .01) & (vb < .995)).astype(np.float32)
+    weight = (va & vb).astype(np.float32)
     average = lambda image: ndi.uniform_filter(image, size=41)
     denominator = average(weight)
     safe = np.maximum(denominator, 1e-6)
@@ -65,18 +68,14 @@ def local_agreement(seamless, evening, seamless_transform, evening_transform):
             * np.clip((denominator - .2) / .3, 0, 1)).astype(np.float32)
 
 
-def recovered_detail(name, source, transform, masks, yy, xx, confidence=None):
+def recovered_detail(name, source, transform, masks, yy, xx, confidence=None, gain=1.0):
     sy, sx = coordinates(transform, yy, xx)
-    v = ndi.map_coordinates(source, [sy, sx], order=1, mode='nearest').astype(np.float32) / 65535
-    valid = np.clip((v - .01) / .035, 0, 1) * np.clip((.995 - v) / .035, 0, 1)
-    valid = apply_masks(valid, masks, sy, sx, N)
+    v, ok = ls.sample(source, sy, sx)
+    valid = apply_masks(ok.astype(np.float32), masks, sy, sx, N)
     # Keep broad Evening illumination changes out of the new contribution.
     sigma = 8 if name == 'Evening' else 32
     denominator = gaussian_filter(valid, sigma)
-    mean = gaussian_filter(v * valid, sigma) / np.maximum(denominator, 1e-5)
-    detail = np.clip((v - mean) / (mean + .15), -.6, .6)
-    if name == 'Evening':
-        detail = -detail
+    detail = ls.detail(v, valid, sigma, -gain if name == 'Evening' else gain)
     # No contribution from invalid samples or directly along their boundaries.
     distance = ndi.distance_transform_edt(np.pad(valid > 0, 32, constant_values=True))[32:-32, 32:-32]
     weight = valid * np.clip(distance / 32, 0, 1) * np.clip(denominator / .7, 0, 1)
@@ -141,7 +140,7 @@ def repair(orbiter, seamless, morning, evening, processed, diagnostics, output):
     evening_transform = transforms.get('Evening')
     if evening_transform is None:
         try:
-            measured = register(reference, sources['Evening'], Settings(analysis_size=768,
+            measured = register(reference, ls.preview(np.asarray(sources['Evening'])), Settings(analysis_size=768,
                                 patch_size=128, grid_points=6, search_radius=6, minimum_correlation=.4))
             evening_transform = pixel_transform(measured, N)
             report['evening_recovery'] = {'registration': measured,
@@ -170,7 +169,7 @@ def repair(orbiter, seamless, morning, evening, processed, diagnostics, output):
             for name, source in sources.items():
                 if name in transforms:
                     details[name], weights[name] = source_detail(name, source, transforms[name],
-                             recorded[name]['masks'], yy, xx, N, 32, settings)
+                             recorded[name]['masks'], yy, xx, N, 32, settings, recorded[name].get('detail_gain', 1.0))
                 else:
                     details[name], weights[name] = np.zeros_like(yy), np.zeros_like(yy)
             smooth_base = gaussian_filter(base[lo:hi], 32)
@@ -189,7 +188,8 @@ def repair(orbiter, seamless, morning, evening, processed, diagnostics, output):
                    transforms['Seamless'], refined_masks(recorded['Seamless']['strips']), yy, xx)
         if evening_transform is not None:
             new_details['Evening'], new_weights['Evening'] = recovered_detail('Evening', sources['Evening'],
-                     evening_transform, masks_from_regions(recorded['Evening']['strips']), yy, xx, confidence)
+                     evening_transform, masks_from_regions(recorded['Evening']['strips']), yy, xx, confidence,
+                     recorded['Evening'].get('detail_gain', 1.0))
         new, new_total = combine(new_details, new_weights, smooth_base)
         gain = np.clip(old_total / .8, 0, 1)
         alpha = np.clip((.8 - gain) / .4, 0, 1)

@@ -6,6 +6,7 @@ import numpy as np
 from scipy import ndimage as nd
 from lunar_filters import gaussian_filter
 from frozen_algorithm import smoothstep,outside_distance,harmonic
+import lunar_source as ls
 
 def render(t):
     started=time.perf_counter();n=t.n;block=512;halo=192
@@ -33,8 +34,7 @@ def render(t):
             for name in t.source_names:
                 raw=aligned[name][roi].astype('float32')/65535;valid=validmaps[name][roi].astype('float32')
                 den=gaussian_filter(valid,16);mean=gaussian_filter(raw*valid,16)/np.maximum(den,1e-6)
-                detail=np.clip((raw-mean)/(mean+.15),-.6,.6)
-                if name=='Evening':detail=-detail
+                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*ls.load_gains(t.root).get(name,1.0))
                 std=np.sqrt(gaussian_filter(detail*detail*valid,32)/np.maximum(gaussian_filter(valid,32),1e-6))
                 detail*=np.clip(desired/np.maximum(std,1e-6),.025,1)
                 fade=np.clip(nd.distance_transform_edt(valid>0)/32,0,1)

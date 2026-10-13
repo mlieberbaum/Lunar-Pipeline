@@ -53,7 +53,8 @@ def sources_reused():
 
 def resize_source(array,size):
     def compute():
-        return np.clip(np.rint(np.asarray(Image.fromarray(array).convert('F').resize((size,size),Image.Resampling.BICUBIC))),0,65535).astype('uint16')
+        from lunar_source import resize_code
+        return resize_code(array,size)
     active=_sources.get()
     if active is None or not getattr(array,'filename',None):return compute()
     folder,entries,_=active

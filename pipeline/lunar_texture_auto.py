@@ -9,7 +9,8 @@ from PIL import Image
 import numpy as np
 import PIL, scipy
 from scipy import ndimage as ndi
-from kaguya_raw import read_scaled_img
+from kaguya_raw import read_raw_img
+import lunar_source as ls
 from lunar_detect import Settings, detect_strips
 from lunar_registration import estimate_registration, RegistrationRejected
 from lunar_mask_policy import MaskPolicy, masks_from_regions, apply_masks
@@ -20,13 +21,19 @@ def load_source(path, name):
     return cached_source(path, name, _load_source)
 
 def _load_source(path, name):
-    if Path(path).suffix.lower()=='.img':return read_scaled_img(path,name)
-    with Image.open(path) as image:
-        a=np.array(image)
-    expected=10800 if name=='Seamless' else 12288
-    if a.dtype!=np.uint16 or a.shape!=(expected,expected):
-        raise ValueError(f'{name}: expected {expected} square uint16 PNG or raw IMG.')
-    return a
+    """Return the source as label-linear codes (see lunar_source)."""
+    if Path(path).suffix.lower()=='.img':
+        raw=read_raw_img(path,name)
+    else:
+        # PNG input must hold the unmodified label DN, not a stretched preview.
+        with Image.open(path) as image:
+            raw=np.array(image)
+        expected=10800 if name=='Seamless' else 12288
+        if raw.dtype!=np.uint16 or raw.shape!=(expected,expected):
+            raise ValueError(f'{name}: expected {expected} square uint16 PNG of label DN or raw IMG.')
+    code=ls.encode(raw)
+    print(f'{name}: unusable samples {100*np.mean(code==0):.4f}%',flush=True)
+    return code
 
 def prepare(orbiter, paths, settings=Settings(), quiet=False):
     N=12288
@@ -39,14 +46,17 @@ def prepare(orbiter, paths, settings=Settings(), quiet=False):
             'Evening detail uses reversed polarity.']}
     sources={};transforms={}
     for name,path in paths.items():
-        scaled=load_source(path,name)
-        strips,profiles=detect_strips(scaled,settings)
+        code=load_source(path,name)
+        # Registration and strip detection use a stretched preview only.
+        view=ls.preview(code)
+        strips,profiles=detect_strips(view,settings)
         if name=='Seamless':
             from lunar_io import resize_source
-            sources[name]=resize_source(scaled,N)
-        else:sources[name]=scaled
+            sources[name]=resize_source(code,N)
+            view=np.clip(np.rint(np.asarray(Image.fromarray(view).convert('F').resize((N,N),Image.Resampling.BICUBIC))),0,65535).astype('uint16')
+        else:sources[name]=code
         try:
-            transform,registration=estimate_registration(reference,sources[name],name)
+            transform,registration=estimate_registration(reference,view,name)
         except RegistrationRejected as error:
             del sources[name]
             report['sources'][name] = {
@@ -58,28 +68,63 @@ def prepare(orbiter, paths, settings=Settings(), quiet=False):
             if not quiet:
                 print('Excluded source:', error, flush=True)
             continue
+        if name=='Seamless' and Path(orbiter).name=='reference_aligned.png':
+            # Reference already resampled onto the Seamless grid; keep Seamless fixed.
+            report.setdefault('seamless_residual_transform_yx',np.asarray(transform).tolist())
+            transform=np.zeros((3,2))
         transforms[name]=transform
         report['sources'][name]={'input_path':str(Path(path).resolve()),
             'input_size_bytes':Path(path).stat().st_size,'enabled':True,'registration':registration,
             'transform_yx':transform.tolist(),'strips':strips,
             'masks':masks_from_regions(strips,N),'strip_profiles':profiles}
         if not quiet:print(name,'registered:',len(registration),'patches;',len(strips),'suspect strips',flush=True)
+    match_detail_gains(sources,transforms,report,N)
     return sources,transforms,report
 
-def source_detail(name,a,transform,strips,yy,xx,N,sigma,settings):
+def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=32):
+    """Scale Morning/Evening relative detail to Seamless contrast.
+
+    Measured at full resolution in a fixed grid of windows where both sources
+    are valid; low-sun products otherwise carry about three times the contrast."""
+    report.setdefault('detail_gains',{})
+    for name in sources:
+        report['sources'][name]['detail_gain']=1.0
+    if 'Seamless' not in sources:return
+    centers=(np.arange(windows)+.5)*N/windows
+    for name in [n for n in sources if n!='Seamless']:
+        num=den=0.0
+        for cy in centers:
+            for cx in centers:
+                y0=int(cy-size/2);x0=int(cx-size/2)
+                yy,xx=np.mgrid[y0:y0+size,x0:x0+size].astype(np.float32)
+                fields={}
+                for k in ['Seamless',name]:
+                    tr=transforms[k];sy=tr[0,0]+tr[1,0]*yy+tr[2,0]*xx;sx=tr[0,1]+tr[1,1]*yy+tr[2,1]*xx
+                    v,ok=ls.sample(sources[k],yy-sy,xx-sx);w=ok.astype(np.float32)
+                    mean=gaussian_filter(v*w,sigma)/np.maximum(gaussian_filter(w,sigma),1e-5)
+                    fields[k]=((v-mean)/np.maximum(mean,ls.MEAN_FLOOR),ok)
+                both=fields['Seamless'][1]&fields[name][1]
+                both=ndi.binary_erosion(both,iterations=8)
+                ds=fields['Seamless'][0][both];dn=fields[name][0][both]
+                # Robust spread: median absolute deviation.
+                if ds.size>size*size//4:
+                    num+=float(np.median(np.abs(ds-np.median(ds))))*ds.size
+                    den+=float(np.median(np.abs(dn-np.median(dn))))*ds.size
+        gain=float(np.clip(num/den,.15,1.5)) if den>0 else 1.0
+        report['sources'][name]['detail_gain']=gain
+        report['detail_gains'][name]=gain
+        print(name,'detail gain relative to Seamless',round(gain,3),flush=True)
+
+def source_detail(name,a,transform,strips,yy,xx,N,sigma,settings,gain=1.0):
     tr = transform
     sy = tr[0,0]+tr[1,0]*yy+tr[2,0]*xx
     sx = tr[0,1]+tr[1,1]*yy+tr[2,1]*xx
     rawx = xx-sx
-    v = ndi.map_coordinates(a,[yy-sy,rawx],order=1,mode='nearest').astype(np.float32)/65535
-    valid = np.clip((v-.01)/.035,0,1)*np.clip((.995-v)/.035,0,1)
-    valid = apply_masks(valid,strips,yy-sy,rawx,N)
+    v, ok = ls.sample(a,yy-sy,rawx)
+    valid = apply_masks(ok.astype(np.float32),strips,yy-sy,rawx,N)
     denom = gaussian_filter(valid,sigma)
-    mean = gaussian_filter(v*valid,sigma)/np.maximum(denom,1e-5)
-    d = np.clip((v-mean)/(mean+.15),-.6,.6)
-    # Evening relief has opposite illumination; use its fine relief with reversed polarity.
-    if name == 'Evening':
-        d = -d
+    # Evening relief has opposite illumination; use its relief with reversed polarity.
+    d = ls.detail(v,valid,sigma,-gain if name=='Evening' else gain)
 
     weight = gaussian_filter(valid,4)*np.clip(denom/.7,0,1)
     return d, weight
@@ -99,7 +144,7 @@ def blend(orbiter,sources,transforms,report,settings=Settings(),quiet=False,sour
             lo, hi = max(0,start-halo), min(N,end+halo)
             yy,xx = np.mgrid[lo:hi,0:N].astype(np.float32)
             details, weights = {}, {}
-            futures={name:pool.submit(source_detail,name,a,transforms[name],report['sources'][name]['masks'],yy,xx,N,sigma,settings) for name,a in sources.items()}
+            futures={name:pool.submit(source_detail,name,a,transforms[name],report['sources'][name]['masks'],yy,xx,N,sigma,settings,report['sources'][name].get('detail_gain',1.0)) for name,a in sources.items()}
             for name,future in futures.items():
                 details[name],weights[name]=future.result()
             for name in ['Seamless', 'Morning', 'Evening']:

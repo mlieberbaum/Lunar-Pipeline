@@ -19,6 +19,7 @@ from frozen_algorithm import smoothstep,large,outside_distance,harmonic,mincut,b
 from repair_lunar_detail import coordinates,refined_masks,local_agreement
 from lunar_mask_policy import apply_masks,masks_from_regions
 from lunar_io import sources_reused,resize_source
+import lunar_source as ls
 Image.MAX_IMAGE_PIXELS=None
 
 def sha(path):
@@ -35,7 +36,7 @@ class Trial:
         self.report={'algorithm':'lunar-refinement-4','size':self.n,'seed':self.seed,
           'large_component_minimum':262144,'small_artifact_minimum':256,'gap_minimum':0,
           'donor_policy':'One sorted whole-tile 128px donor pool; grid 64; global quilt raster step 96. Donors restricted to .6–1.6 times local trusted texture RMS where possible.',
-          'validity_definition':'Registered, in bounds, intensity .01 to .995, outside zero seam cores; Evening requires positive local agreement. Processing usability, not scientific IMG no-data flags.',
+          'validity_definition':'Registered, in bounds, label DN 2..32766 (not DUMMY or saturated), outside zero seam cores; Evening requires positive local agreement.',
           'limitations':['Trial on two tiles, not validated for arbitrary tiles or neighboring geographic boundaries.','Synthetic exemplar placements are invented texture, not recovered lunar geography.']}
     def log(self,*args):print(*args,flush=True)
     def create(self,name,dtype='float32',shape=None):
@@ -85,6 +86,8 @@ class Trial:
         transforms={name:np.array(original[name]['transform_yx']) for name in ['Seamless','Morning'] if original[name].get('enabled',True)}
         if 'transform_yx' in recovered:transforms['Evening']=np.array(recovered['transform_yx'])
         self.source_names=list(transforms)
+        self.detail_gains={name:float(original[name].get('detail_gain',1.0)) for name in self.source_names}
+        ls.save_gains(self.root,self.detail_gains)
         sources={name:self.cache_png(name,cfg[name.lower()],resize=name=='Seamless') for name in self.source_names}
         confidence=local_agreement(sources['Seamless'],sources['Evening'],transforms['Seamless'],transforms['Evening']) if 'Evening' in sources else None
         availability=self.create('availability','bool');availability[:]=False
@@ -94,9 +97,8 @@ class Trial:
             for start,end,lo,hi,sl in self.stripes(block=512):
                 yy,xx=np.mgrid[start:end,:self.n].astype(np.float32)
                 sy,sx=coordinates(transforms[name],yy,xx)
-                values=ndi.map_coordinates(sources[name],[sy,sx],order=1,mode='nearest')
-                v=values.astype('float32')/65535
-                valid=((sy>=0)&(sx>=0)&(sy<self.n-1)&(sx<self.n-1)&(v>.01)&(v<.995))
+                v,valid=ls.sample(sources[name],sy,sx)
+                values=np.rint(v*65535).astype('uint16')
                 valid=apply_masks(valid.astype('float32'),masks,sy,sx,self.n)>0
                 if name=='Evening':valid&=ndi.map_coordinates(confidence,[yy/8,xx/8],order=1,mode='nearest')>0
                 aligned[start:end]=values;validmap[start:end]=valid;availability[start:end]|=valid
@@ -321,8 +323,7 @@ class Trial:
             def source_fields(name):
                 raw=aligned[name][lo:hi,left:right].astype('float32')/65535;valid=validity[name][lo:hi,left:right].astype('float32')
                 den=gaussian_filter(valid,16);mean=gaussian_filter(raw*valid,16)/np.maximum(den,1e-6)
-                detail=np.clip((raw-mean)/(mean+.15),-.6,.6)
-                if name=='Evening':detail=-detail
+                detail=ls.detail(raw,valid,16,(-1 if name=='Evening' else 1)*self.detail_gains.get(name,1.0))
                 source_std=np.sqrt(gaussian_filter(detail*detail*valid,32)/np.maximum(gaussian_filter(valid,32),1e-6))
                 detail*=np.clip(desired/np.maximum(source_std,1e-6),.025,1)
                 fade=np.clip(ndi.distance_transform_edt(valid>0)/32,0,1)

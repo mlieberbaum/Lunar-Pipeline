@@ -40,8 +40,8 @@ def stretch_uint16(raw):
     return scaled, limits
 
 
-def read_scaled_img(path, product):
-    """Read headerless MSB uint16 row-major IMG, then stretch as in MATLAB."""
+def read_raw_img(path, product):
+    """Read headerless MSB uint16 row-major IMG as label DN (no stretch)."""
     key = str(product).lower()
     if key not in SIZES:
         raise ValueError('Product must be Seamless, Morning, or Evening.')
@@ -54,7 +54,11 @@ def read_scaled_img(path, product):
     raw = np.fromfile(path, dtype='>u2')
     if raw.size != size * size:
         raise ValueError(f'Incomplete IMG read: {path}')
-    raw = raw.reshape(size, size)
-    scaled, limits = stretch_uint16(raw)
+    return raw.reshape(size, size).astype(np.uint16)
+
+
+def read_scaled_img(path, product):
+    """Display-only 0.5/99.5 stretch, as in the MATLAB preview loader."""
+    scaled, limits = stretch_uint16(read_raw_img(path, product))
     print(f'{product}: stretch limits {limits[0]:.17g}, {limits[1]:.17g}', flush=True)
     return scaled

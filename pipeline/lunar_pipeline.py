@@ -9,6 +9,23 @@ from lunar_io import reuse_sources, release_blend_fields
 from lunar_workspace import mapping_scope, claim_output
 
 
+def _keep_debug(work):
+    """Opt-in: LUNAR_DEBUG_DIR keeps base image, support and repair masks."""
+    import os, shutil
+    target = os.environ.get('LUNAR_DEBUG_DIR')
+    if not target:
+        return
+    target = Path(target); target.mkdir(parents=True, exist_ok=True)
+    names = ['base.npy', 'candidate.npy', 'candidate.repair-mask.npy', 'candidate.old-detail-support.npy',
+             'candidate.measured-support.npy', 'cache/availability.npy', 'cache/big_core.npy',
+             'cache/small_core.npy', 'cache/quilt_core.npy', 'cache/tone_alpha.npy', 'cache/output.npy',
+             'cache/changed.npy', 'cache/detail_gains.json']
+    for name in names:
+        source = work / name
+        if source.exists():
+            shutil.copyfile(source, target / name.replace('/', '_'))
+
+
 def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
                   settings=Settings(), source_workers=1):
     from lunar_texture_auto import build_base_texture
@@ -34,6 +51,9 @@ def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
         with open(work / 'processing.log', 'w') as log:
             with contextlib.redirect_stdout(log) if quiet else contextlib.nullcontext():
                 before=time.perf_counter()
+                from lunar_texture_auto import load_source
+                from lunar_source import align_reference
+                orbiter, reference_transform = align_reference(orbiter, load_source(seamless, 'Seamless'), work / 'reference_aligned.png')
                 base_report = build_base_texture(orbiter, seamless, morning, evening,
                     base, quiet=quiet, settings=settings, source_workers=source_workers)
                 base_seconds=time.perf_counter()-before;before=time.perf_counter()
@@ -52,8 +72,10 @@ def _build_texture(orbiter, seamless, morning, evening, output, quiet=False,
                     size=12288, filter_workers=source_workers)
                 trial = Trial(config)
                 trial.run()
+                _keep_debug(work)
         report = trial.report
         report['base_processing'] = base_report
+        report['reference_alignment_transform_yx'] = None if reference_transform is None else reference_transform.tolist()
         report['measured_detail_recovery'] = repair_report
         report['stage_seconds']['base_processing']=base_seconds
         report['stage_seconds']['measured_detail_recovery']=recovery_seconds
