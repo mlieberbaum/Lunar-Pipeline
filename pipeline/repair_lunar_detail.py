@@ -191,7 +191,7 @@ def repair(orbiter, seamless, morning, evening, processed, diagnostics, output):
                      'Seamless':np.zeros_like(yy),'Evening':np.zeros_like(yy)}
         new_details, new_weights = details.copy(), weights.copy()
         new_details['Seamless'], new_weights['Seamless'] = recovered_detail('Seamless', sources['Seamless'],
-                   transforms['Seamless'], recorded['Seamless']['masks'], yy, xx)
+                   transforms['Seamless'], _legacy_refined_masks(recorded['Seamless']['strips']), yy, xx)
         if evening_transform is not None:
             new_details['Evening'], new_weights['Evening'] = recovered_detail('Evening', sources['Evening'],
                      evening_transform, masks_from_regions(recorded['Evening']['strips']), yy, xx, confidence,

@@ -87,17 +87,17 @@ def prepare(orbiter, paths, settings=Settings(), quiet=False):
     match_detail_gains(sources,transforms,report,N)
     return sources,transforms,report
 
-SEAM_FADE = 48.0
+EVENING_FILL_SCALE = .5
 
 def seamless_masks(strips,N):
-    """Traced seam paths when available; narrow axis-aligned bands otherwise."""
-    import lunar_geometry
-    if lunar_geometry.SEAM_PATHS:
-        others=[r for r in strips if r['axis']!='x']
-        return lunar_geometry.path_masks(lunar_geometry.SEAM_PATHS)+ls.narrow_masks(others,N)
-    return ls.narrow_masks(strips,N)
+    """v4.1 seam handling: wide feathered bands around detected seams.
 
-def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=8):
+    Seamless fades out over ~330 px around each seam and Morning/Evening fill
+    the band, so neighbouring strips blend gradually instead of meeting at a
+    line. (Traced seam paths still group strips for the geometry warp.)"""
+    return masks_from_regions(strips,N)
+
+def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=32):
     """Scale Morning/Evening relative detail to Seamless contrast.
 
     Measured at full resolution in a fixed grid of windows where both sources
@@ -128,6 +128,10 @@ def match_detail_gains(sources,transforms,report,N,windows=4,size=768,sigma=8):
                     num+=float(np.median(np.abs(ds-np.median(ds))))*ds.size
                     den+=float(np.median(np.abs(dn-np.median(dn))))*ds.size
         gain=float(np.clip(num/den,.15,1.5)) if den>0 else 1.0
+        if name=='Evening':
+            # Opposite-sun relief (used with reversed polarity) is only a
+            # stand-in; keep it subdued so it reads as texture, not features.
+            gain*=EVENING_FILL_SCALE
         report['sources'][name]['detail_gain']=gain
         report['detail_gains'][name]=gain
         print(name,'detail gain relative to Seamless',round(gain,3),flush=True)
@@ -138,19 +142,13 @@ def source_detail(name,a,transform,strips,yy,xx,N,sigma,settings,gain=1.0):
     v, ok = ls.sample(a,sy,sx)
     valid = apply_masks(ok.astype(np.float32),strips,sy,sx,N)
     denom = gaussian_filter(valid,sigma)
-    # Low-sun products fill gaps with texture only (<= 8 px): their broad
-    # shading would print as streaks; broad tone comes from the reference.
-    detail_sigma = sigma if name=='Seamless' else min(sigma,8)
+    # As in v4.1, every product contributes detail at the same scale, so the
+    # wide seam blend keeps full structure across the fill band.
+    detail_sigma = sigma
     # Evening relief has opposite illumination; use its relief with reversed polarity.
     d = ls.detail(v,valid,detail_sigma,(-gain if name=='Evening' else gain)*ls.gain_at(yy,xx,N))
 
     weight = gaussian_filter(valid,4)*np.clip(denom/.7,0,1)
-    seams=[m for m in strips if m.get('kind')=='path']
-    if seams:
-        # Cross-fade into traced seam bands over ~48 px so the filled band
-        # does not read as a distinct stripe; small holes keep tight edges.
-        wide=apply_masks(np.ones_like(valid),[dict(m,feather=SEAM_FADE) for m in seams],sy,sx,N)
-        weight *= wide*wide*(3-2*wide)
     return d, weight
 
 def blend(orbiter,sources,transforms,report,settings=Settings(),quiet=False,source_workers=1,output_size=12288):

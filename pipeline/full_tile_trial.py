@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage as ndi
 from frozen_algorithm import smoothstep,large,outside_distance,harmonic,mincut,bands
-from repair_lunar_detail import coordinates,refined_masks,local_agreement
+from repair_lunar_detail import coordinates,refined_masks,local_agreement,_legacy_refined_masks
 from lunar_mask_policy import apply_masks,masks_from_regions
 from lunar_io import sources_reused,resize_source
 import lunar_source as ls
@@ -93,7 +93,7 @@ class Trial:
         availability=self.create('availability','bool');availability[:]=False
         for name in self.source_names:
             aligned=self.create('aligned_'+name,'uint16');validmap=self.create('valid_'+name,'bool')
-            masks=(original[name]['masks'] if name=='Seamless' else masks_from_regions(original[name]['strips']) if name=='Evening' else original[name]['masks'])
+            masks=(_legacy_refined_masks(original[name]['strips']) if name=='Seamless' else masks_from_regions(original[name]['strips']) if name=='Evening' else original[name]['masks'])
             for start,end,lo,hi,sl in self.stripes(block=512):
                 yy,xx=np.mgrid[start:end,:self.n].astype(np.float32)
                 sy,sx=coordinates(transforms[name],yy,xx,name)

@@ -276,8 +276,11 @@ def align_products(sources, strips, scale_seamless, report=None, min_reliable=.5
             anchor = 'Morning'
             report['seamless_field_range_yx'] = [[float(-field[..., k].max()), float(-field[..., k].min())] for k in range(2)]
     if 'Evening' in sources:
-        ref, ref_scale = (sources['Morning'], 1.0) if anchor == 'Morning' else (S, scale_seamless)
-        raw, scores = measure(ref, ref_scale, sources['Evening'], 1.0)
+        # Evening is measured against Seamless (already warped into the
+        # anchor frame): Seamless has data nearly everywhere, whereas Morning
+        # is dark in exactly the shadowed areas where Evening is needed.
+        raw, scores = measure(S, scale_seamless, sources['Evening'], 1.0,
+                              ref_name='Seamless' if 'Seamless' in FIELDS else None)
         good = np.isfinite(raw[..., 0])
         report['evening_reliable_cells_percent'] = 100 * float(good.mean())
         report['evening_median_score'] = float(np.median(scores))

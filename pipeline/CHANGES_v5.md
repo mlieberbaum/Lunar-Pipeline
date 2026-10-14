@@ -43,12 +43,17 @@ All source handling goes through `lunar_source.py` and `lunar_geometry.py`.
    field. The Orbiter reference is resampled onto the anchor grid instead of
    shifting Kaguya, so tile edges keep real data. Falls back to the Seamless
    grid if Morning cannot be registered.
-5. **Seams.** Seams are traced row by row (they wander tens of pixels),
-   using steps in brightness and in texture contrast so narrow slivers of a
-   third, low-sun strip are excluded with the join. Only the traced span
-   plus 16 px is excluded (v4.1 removed ~700 px around
-   a fixed column). Local means are computed separately on each side so a
-   brightness step between strips never leaks into the detail.
+5. **Seams: v4.1 behaviour restored.** Seamless is excluded around each
+   detected seam with v4.1's wide feathered masks (about +-170 px plus half
+   the seam width, fading over 160 px) and the repair stages use v4.1's
+   narrower masks (+-32 px, 64 px fade). Morning, then Evening, fill the band
+   at full detail scale, so neighbouring strips blend gradually. Seams are
+   still traced row by row, but only to group Seamless strips for the
+   geometry warp. Two changes to the fill: Evening is aligned against warped
+   Seamless (Morning is often dark exactly where Evening is needed), and
+   Evening fill detail is halved (`EVENING_FILL_SCALE = .5`) because its
+   opposite-sun relief, used with reversed polarity, otherwise prints bright
+   dots.
 6. **Shadows and penumbra.** Log detail is smoothly limited (tanh, about
    x0.37..x2.7), so near-black penumbra samples cannot print dark slots.
    Where no product has data and the reference is dark (permanent shadow),
@@ -74,17 +79,17 @@ Set `LUNAR_DEBUG_DIR` to keep intermediate masks.
 | tile | v4.1 | v5 |
 |------|------|----|
 | 217h | 5.3% | 0.01% |
-| 407a | 5.4% | 0.45% |
-| 407g | 9.7% | 1.6% |
+| 407a | 5.4% | 0.74% |
+| 407g | 9.7% | 2.4% |
+
+217h is 99.5% byte-identical to the previous v5 checkpoint (it has no seams).
 
 ## Known open items
 
-- Wide seam bands filled with Morning texture can read as a speckled
-  vertical band (softened by a 48 px cross-fade). A mirrored-Seamless fill
-  was tried and rejected: it creates symmetric chevrons on structured
-  terrain such as crater rims. Candidates: short edge mirroring plus
-  attenuated Morning texture; v4.1-style wide masking on the new geometry;
-  quilting restricted to neighbouring Seamless.
+- Seam bands use Morning/Evening (low-sun) texture and, where both are dark,
+  quilted texture, as in v4.1; at full resolution a band can show low-sun
+  relief or borrowed texture, but it does not read as a stripe.
+- Small no-data spots can be filled as smooth patches by the tone solve.
 - Mosaic patches inside Seamless that are not north-south seams (e.g. a
   higher-sun patch on a crater floor) can leave a faint outline.
 - Neighbor-tile boundaries (aprons) not yet addressed.
